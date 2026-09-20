@@ -231,9 +231,25 @@ app.post('/api/police/find', async (req, res) => {
     let longitude = Number(providedLongitude);
     let display_name = query;
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-      const geoUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ', India')}&format=json&limit=1`;
-      const geoResp = await fetch(geoUrl, { headers: { 'User-Agent': 'NyayaBot/1.0' } });
-      const geoData = await geoResp.json();
+      const trimmedQuery = query.trim();
+      const isPincode = /^\d{6}$/.test(trimmedQuery);
+      const geocodeQueries = isPincode
+        ? [`postalcode=${trimmedQuery}&country=India`, `${trimmedQuery}, India`]
+        : [`${trimmedQuery}, India`, trimmedQuery];
+      let geoData = [];
+
+      for (const geocodeQuery of geocodeQueries) {
+        const geoUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(geocodeQuery)}&format=json&limit=1&countrycodes=in`;
+        const geoResp = await fetch(geoUrl, {
+          headers: { 'User-Agent': 'NyayaBot/1.0 (legal assistance app)' },
+        });
+        if (!geoResp.ok) continue;
+        const candidateData = await geoResp.json();
+        if (candidateData.length > 0) {
+          geoData = candidateData;
+          break;
+        }
+      }
 
       if (!geoData || geoData.length === 0) {
         return res.json({ success: true, stations: [], tip: 'Location not found. Try a different pincode or area name.' });
