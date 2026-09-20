@@ -43,7 +43,7 @@ export async function getScamPatterns() {
   return data;
 }
 export async function findPoliceStations(query, coordinates) {
-  const { data } = await api.post('/api/police/find', { query, ...coordinates });
+  const { data } = await api.post('/api/police/find', { query, ...coordinates }, { timeout: 40000 });
   return data;
 }
 export async function getLawyerConsultation(issue) {

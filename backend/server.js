@@ -30,7 +30,7 @@ import {
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
+app.set('trust proxy', 1);
 // ── Middleware ─────────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
@@ -315,7 +315,7 @@ app.post('/api/police/find', async (req, res) => {
     // retries could take up to 3x7s = 21s on top of geocoding, which blew past the
     // frontend's 25s axios timeout whenever a mirror was slow or rate-limiting us
     // (common for cloud/datacenter IPs like Render's).
-    const OVERPASS_TIMEOUT = 8000;
+    const OVERPASS_TIMEOUT = 15000;
     const overpassAttempts = overpassEndpoints.map(async (overpassUrl) => {
       const overpassResp = await fetchWithTimeout(overpassUrl, {
         method: 'POST',
