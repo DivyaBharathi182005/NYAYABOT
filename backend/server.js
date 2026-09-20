@@ -220,7 +220,7 @@ app.get('/api/scam/patterns', (req, res) => {
   });
 });
 
-// ── POLICE STATIONS — Real data via OpenStreetMap Overpass API ────
+// ── POLICE STATIONS — Real data via Geoapify (Geocoding + Places API) ──
 const fetchWithTimeout = async (url, options = {}, timeoutMs = 7000) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -235,134 +235,60 @@ app.post('/api/police/find', async (req, res) => {
   const { query, latitude: providedLatitude, longitude: providedLongitude } = req.body;
   if (!query?.trim()) return res.status(400).json({ error: 'Query is required' });
 
+  const GEOAPIFY_KEY = process.env.GEOAPIFY_API_KEY;
+  if (!GEOAPIFY_KEY) {
+    console.error('Police find error: GEOAPIFY_API_KEY is not set');
+    return res.json({
+      success: true,
+      stations: [],
+      tip: `Search failed. Open Google Maps and search "police station near ${query}" or call 100.`,
+    });
+  }
+
   try {
-    // Step 1: Geocode the query using Nominatim (free, no key needed)
     let latitude = Number(providedLatitude);
     let longitude = Number(providedLongitude);
     let display_name = query;
+
+    // Step 1: Geocode (skip if coordinates were already provided by "Use My Location")
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
       const trimmedQuery = query.trim();
-      const isPincode = /^\d{6}$/.test(trimmedQuery);
-      const NOMINATIM_HEADERS = { 'User-Agent': 'NyayaBot/1.0 (legal assistance app; contact: nyayabot@example.com)' };
-      const GEO_TIMEOUT = 4000;
-      let geoData = [];
-
-      // Structured query for pincodes (previously this was incorrectly built as
-      // free-text "postalcode=X&country=India" inside q=, which never matched
-      // anything and silently wasted a full request+timeout).
-      if (isPincode) {
-        const structuredUrl = `https://nominatim.openstreetmap.org/search?postalcode=${trimmedQuery}&country=India&format=json&limit=1&countrycodes=in`;
-        try {
-          const geoResp = await fetchWithTimeout(structuredUrl, { headers: NOMINATIM_HEADERS }, GEO_TIMEOUT);
-          if (geoResp.ok) geoData = await geoResp.json();
-        } catch { /* fall through to free-text below */ }
-      }
+      const geoUrl = `https://api.geoapify.com/v1/geocode/search?text=${encodeURIComponent(`${trimmedQuery}, India`)}&filter=countrycode:in&format=json&limit=1&apiKey=${GEOAPIFY_KEY}`;
+      const geoResp = await fetchWithTimeout(geoUrl, {}, 10000);
+      if (!geoResp.ok) throw new Error(`Geoapify geocoding returned ${geoResp.status}`);
+      const geoJson = await geoResp.json();
+      const geoData = geoJson.results || [];
 
       if (geoData.length === 0) {
-        const freeTextQuery = `${trimmedQuery}, India`;
-        const geoUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(freeTextQuery)}&format=json&limit=1&countrycodes=in`;
-        try {
-          const geoResp = await fetchWithTimeout(geoUrl, { headers: NOMINATIM_HEADERS }, GEO_TIMEOUT);
-          if (geoResp.ok) geoData = await geoResp.json();
-        } catch { /* fall through to postal fallback below */ }
-      }
-
-      if (geoData.length === 0 && isPincode) {
-        try {
-          const postalResp = await fetchWithTimeout(
-            `https://api.postalpincode.in/pincode/${trimmedQuery}`,
-            { headers: NOMINATIM_HEADERS },
-            GEO_TIMEOUT,
-          );
-          if (postalResp.ok) {
-            const postalData = await postalResp.json();
-            const postOffice = postalData[0]?.PostOffice?.[0];
-            if (postOffice) {
-              const fallbackQuery = `${postOffice.Name}, ${postOffice.District}, ${postOffice.State}, India`;
-              const fallbackUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(fallbackQuery)}&format=json&limit=1&countrycodes=in`;
-              const fallbackResp = await fetchWithTimeout(fallbackUrl, { headers: NOMINATIM_HEADERS }, GEO_TIMEOUT);
-              if (fallbackResp.ok) geoData = await fallbackResp.json();
-            }
-          }
-        } catch { /* handled below by the empty-result response */ }
-      }
-
-      if (!geoData || geoData.length === 0) {
         return res.json({ success: true, stations: [], tip: 'Location not found. Try a different pincode or area name.' });
       }
 
-      latitude = parseFloat(geoData[0].lat);
-      longitude = parseFloat(geoData[0].lon);
-      display_name = geoData[0].display_name;
-    }
-    const radius = 5000; // 5km radius
-
-    // Step 2: Query Overpass API for police stations nearby
-    const overpassQuery = `
-      [out:json][timeout:7];
-      (
-        node["amenity"="police"](around:${radius},${latitude},${longitude});
-        way["amenity"="police"](around:${radius},${latitude},${longitude});
-      );
-      out center 10;
-    `;
-    const overpassEndpoints = [
-      'https://overpass-api.de/api/interpreter',
-      'https://overpass.kumi.systems/api/interpreter',
-      'https://overpass.private.coffee/api/interpreter',
-    ];
-    // Race all mirrors in parallel instead of trying them one-by-one — sequential
-    // retries could take up to 3x7s = 21s on top of geocoding, which blew past the
-    // frontend's 25s axios timeout whenever a mirror was slow or rate-limiting us
-    // (common for cloud/datacenter IPs like Render's).
-    const OVERPASS_TIMEOUT = 15000;
-    const overpassAttempts = overpassEndpoints.map(async (overpassUrl) => {
-      const overpassResp = await fetchWithTimeout(overpassUrl, {
-        method: 'POST',
-        body: overpassQuery,
-        headers: { 'Content-Type': 'text/plain', 'User-Agent': 'NyayaBot/1.0' },
-      }, OVERPASS_TIMEOUT);
-      if (!overpassResp.ok) throw new Error(`Overpass returned ${overpassResp.status}`);
-      return overpassResp.json();
-    });
-    let overpassData;
-    try {
-      overpassData = await Promise.any(overpassAttempts);
-    } catch (aggregateError) {
-      throw aggregateError.errors?.[0] || new Error('No Overpass endpoint responded');
+      latitude = geoData[0].lat;
+      longitude = geoData[0].lon;
+      display_name = geoData[0].formatted || trimmedQuery;
     }
 
-    const elements = overpassData.elements || [];
+    // Step 2: Find nearby police stations via Geoapify Places API
+    const radius = 5000; // 5km
+    const placesUrl = `https://api.geoapify.com/v2/places?categories=service.police&filter=circle:${longitude},${latitude},${radius}&bias=proximity:${longitude},${latitude}&limit=10&apiKey=${GEOAPIFY_KEY}`;
+    const placesResp = await fetchWithTimeout(placesUrl, {}, 10000);
+    if (!placesResp.ok) throw new Error(`Geoapify places returned ${placesResp.status}`);
+    const placesJson = await placesResp.json();
+    const features = placesJson.features || [];
 
-    // Step 3: Format results with distance calculation
-    const stations = elements.map((el) => {
-      const elLat = el.lat || el.center?.lat;
-      const elLon = el.lon || el.center?.lon;
-
-      // Haversine distance in km
-      const R = 6371;
-      const dLat = ((elLat - latitude) * Math.PI) / 180;
-      const dLon = ((elLon - longitude) * Math.PI) / 180;
-      const a = Math.sin(dLat / 2) ** 2 + Math.cos((latitude * Math.PI) / 180) * Math.cos((elLat * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
-      const distKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
-      const tags = el.tags || {};
-      const name = tags.name || tags['name:en'] || 'Police Station';
-      const phone = tags.phone || tags['contact:phone'] || tags['phone:IN'] || null;
-      const street = tags['addr:street'] || '';
-      const city = tags['addr:city'] || tags['addr:suburb'] || '';
-      const full = tags['addr:full'] || '';
-      const address = full || [street, city].filter(Boolean).join(', ') || display_name.split(',').slice(0, 3).join(',');
-
+    // Step 3: Format results
+    const stations = features.map((f) => {
+      const p = f.properties || {};
+      const distKm = (p.distance || 0) / 1000;
       return {
-        name,
-        address: address || 'Address not available',
-        phone: phone ? phone.replace(/\s+/g, '') : null,
+        name: p.name || 'Police Station',
+        address: p.formatted || p.address_line2 || 'Address not available',
+        phone: p.contact?.phone || p.datasource?.raw?.phone || null,
         distance: distKm < 1 ? `${Math.round(distKm * 1000)}m` : `${distKm.toFixed(1)}km`,
         distKm,
-        lat: elLat,
-        lon: elLon,
-        type: tags.operator || tags.department || 'Police Station',
+        lat: p.lat,
+        lon: p.lon,
+        type: 'Police Station',
       };
     })
     .sort((a, b) => a.distKm - b.distKm)
@@ -380,7 +306,6 @@ app.post('/api/police/find', async (req, res) => {
 
   } catch (err) {
     console.error('Police find error:', err.message);
-    // Fallback: return Google Maps search link
     res.json({
       success: true,
       stations: [],
