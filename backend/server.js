@@ -243,42 +243,48 @@ app.post('/api/police/find', async (req, res) => {
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
       const trimmedQuery = query.trim();
       const isPincode = /^\d{6}$/.test(trimmedQuery);
-      const geocodeQueries = isPincode
-        ? [`postalcode=${trimmedQuery}&country=India`, `${trimmedQuery}, India`]
-        : [`${trimmedQuery}, India`, trimmedQuery];
+      const NOMINATIM_HEADERS = { 'User-Agent': 'NyayaBot/1.0 (legal assistance app; contact: nyayabot@example.com)' };
+      const GEO_TIMEOUT = 4000;
       let geoData = [];
 
-      for (const geocodeQuery of geocodeQueries) {
-        const geoUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(geocodeQuery)}&format=json&limit=1&countrycodes=in`;
-        const geoResp = await fetchWithTimeout(geoUrl, {
-          headers: { 'User-Agent': 'NyayaBot/1.0 (legal assistance app)' },
-        }, 5000);
-        if (!geoResp.ok) continue;
-        const candidateData = await geoResp.json();
-        if (candidateData.length > 0) {
-          geoData = candidateData;
-          break;
-        }
+      // Structured query for pincodes (previously this was incorrectly built as
+      // free-text "postalcode=X&country=India" inside q=, which never matched
+      // anything and silently wasted a full request+timeout).
+      if (isPincode) {
+        const structuredUrl = `https://nominatim.openstreetmap.org/search?postalcode=${trimmedQuery}&country=India&format=json&limit=1&countrycodes=in`;
+        try {
+          const geoResp = await fetchWithTimeout(structuredUrl, { headers: NOMINATIM_HEADERS }, GEO_TIMEOUT);
+          if (geoResp.ok) geoData = await geoResp.json();
+        } catch { /* fall through to free-text below */ }
+      }
+
+      if (geoData.length === 0) {
+        const freeTextQuery = `${trimmedQuery}, India`;
+        const geoUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(freeTextQuery)}&format=json&limit=1&countrycodes=in`;
+        try {
+          const geoResp = await fetchWithTimeout(geoUrl, { headers: NOMINATIM_HEADERS }, GEO_TIMEOUT);
+          if (geoResp.ok) geoData = await geoResp.json();
+        } catch { /* fall through to postal fallback below */ }
       }
 
       if (geoData.length === 0 && isPincode) {
-        const postalResp = await fetchWithTimeout(
-          `https://api.postalpincode.in/pincode/${trimmedQuery}`,
-          { headers: { 'User-Agent': 'NyayaBot/1.0 (legal assistance app)' } },
-          5000,
-        );
-        if (postalResp.ok) {
-          const postalData = await postalResp.json();
-          const postOffice = postalData[0]?.PostOffice?.[0];
-          if (postOffice) {
-            const fallbackQuery = `${postOffice.Name}, ${postOffice.District}, ${postOffice.State}, India`;
-            const fallbackUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(fallbackQuery)}&format=json&limit=1&countrycodes=in`;
-            const fallbackResp = await fetchWithTimeout(fallbackUrl, {
-              headers: { 'User-Agent': 'NyayaBot/1.0 (legal assistance app)' },
-            }, 5000);
-            if (fallbackResp.ok) geoData = await fallbackResp.json();
+        try {
+          const postalResp = await fetchWithTimeout(
+            `https://api.postalpincode.in/pincode/${trimmedQuery}`,
+            { headers: NOMINATIM_HEADERS },
+            GEO_TIMEOUT,
+          );
+          if (postalResp.ok) {
+            const postalData = await postalResp.json();
+            const postOffice = postalData[0]?.PostOffice?.[0];
+            if (postOffice) {
+              const fallbackQuery = `${postOffice.Name}, ${postOffice.District}, ${postOffice.State}, India`;
+              const fallbackUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(fallbackQuery)}&format=json&limit=1&countrycodes=in`;
+              const fallbackResp = await fetchWithTimeout(fallbackUrl, { headers: NOMINATIM_HEADERS }, GEO_TIMEOUT);
+              if (fallbackResp.ok) geoData = await fallbackResp.json();
+            }
           }
-        }
+        } catch { /* handled below by the empty-result response */ }
       }
 
       if (!geoData || geoData.length === 0) {
@@ -305,23 +311,26 @@ app.post('/api/police/find', async (req, res) => {
       'https://overpass.kumi.systems/api/interpreter',
       'https://overpass.private.coffee/api/interpreter',
     ];
+    // Race all mirrors in parallel instead of trying them one-by-one — sequential
+    // retries could take up to 3x7s = 21s on top of geocoding, which blew past the
+    // frontend's 25s axios timeout whenever a mirror was slow or rate-limiting us
+    // (common for cloud/datacenter IPs like Render's).
+    const OVERPASS_TIMEOUT = 8000;
+    const overpassAttempts = overpassEndpoints.map(async (overpassUrl) => {
+      const overpassResp = await fetchWithTimeout(overpassUrl, {
+        method: 'POST',
+        body: overpassQuery,
+        headers: { 'Content-Type': 'text/plain', 'User-Agent': 'NyayaBot/1.0' },
+      }, OVERPASS_TIMEOUT);
+      if (!overpassResp.ok) throw new Error(`Overpass returned ${overpassResp.status}`);
+      return overpassResp.json();
+    });
     let overpassData;
-    let lastOverpassError;
-    for (const overpassUrl of overpassEndpoints) {
-      try {
-        const overpassResp = await fetchWithTimeout(overpassUrl, {
-          method: 'POST',
-          body: overpassQuery,
-          headers: { 'Content-Type': 'text/plain', 'User-Agent': 'NyayaBot/1.0' },
-        }, 7000);
-        if (!overpassResp.ok) throw new Error(`Overpass returned ${overpassResp.status}`);
-        overpassData = await overpassResp.json();
-        break;
-      } catch (error) {
-        lastOverpassError = error;
-      }
+    try {
+      overpassData = await Promise.any(overpassAttempts);
+    } catch (aggregateError) {
+      throw aggregateError.errors?.[0] || new Error('No Overpass endpoint responded');
     }
-    if (!overpassData) throw lastOverpassError || new Error('No Overpass endpoint responded');
 
     const elements = overpassData.elements || [];
 
