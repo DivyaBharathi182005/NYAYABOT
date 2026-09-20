@@ -15,6 +15,7 @@ export default function PoliceStationPage() {
   const [searched, setSearched] = useState('');
   const [userCoords, setUserCoords] = useState(null);
   const [mapStation, setMapStation] = useState(null);
+  const [searchTip, setSearchTip] = useState('');
 
   // Auto-get location on mount
   useEffect(() => {
@@ -29,14 +30,18 @@ export default function PoliceStationPage() {
   const find = async (q, coordinates = null) => {
     const query = q || input.trim();
     if (!query) { toast.error('Enter a pincode or area name'); return; }
-    setLoading(true); setStations([]); setMapStation(null);
+    setLoading(true); setStations([]); setMapStation(null); setSearchTip('');
     try {
       const data = await findPoliceStations(query, coordinates);
       setStations(data.stations || []);
       setSearched(query);
-      if ((data.stations || []).length === 0) toast.error('No stations found. Try a different area.');
+      setSearchTip(data.tip || '');
+      if ((data.stations || []).length === 0) toast.error(data.tip || 'No stations found. Try a different area.');
     } catch (e) {
-      toast.error('Could not find stations. Please try again.');
+      const message = e.response?.data?.error || (e.code === 'ERR_NETWORK'
+        ? 'Backend is unreachable. Check the deployed API URL.'
+        : 'Could not find stations. Please try again.');
+      toast.error(message);
     } finally { setLoading(false); }
   };
 
@@ -124,6 +129,13 @@ export default function PoliceStationPage() {
         <div style={{ textAlign: 'center', padding: 40, color: MUTED }}>
           <div style={{ width: 32, height: 32, border: '2px solid rgba(201,168,76,0.2)', borderTopColor: G, borderRadius: '50%', animation: 'spin .8s linear infinite', margin: '0 auto 14px' }} />
           Searching police stations near "{input}"...
+        </div>
+      )}
+
+      {!loading && searchTip && stations.length === 0 && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', color: MUTED, fontSize: 13, lineHeight: 1.5, padding: '14px 16px', border: '1px solid rgba(232,92,92,0.25)', borderRadius: 10, background: 'rgba(232,92,92,0.06)' }}>
+          <AlertTriangle size={16} color={DANGER} style={{ flexShrink: 0, marginTop: 2 }} />
+          <span>{searchTip}</span>
         </div>
       )}
 

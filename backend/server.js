@@ -34,12 +34,20 @@ const PORT = process.env.PORT || 5000;
 // ── Middleware ─────────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
+const configuredFrontendOrigins = (process.env.FRONTEND_URL || '')
+  .split(',')
+  .map((origin) => origin.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'http://localhost:3000',
-    process.env.FRONTEND_URL,
-  ].filter(Boolean),
+  origin: (origin, callback) => {
+    if (!origin || origin === 'http://localhost:5173' || origin === 'http://localhost:3000'
+      || configuredFrontendOrigins.includes(origin)
+      || /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Origin not allowed by CORS'));
+  },
   credentials: true,
 }));
 app.use(express.json({ limit: '10mb' }));
@@ -49,6 +57,10 @@ const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders:
 app.use('/api/', limiter);
 
 // ── Health Check ───────────────────────────────────────────────────
+app.get('/', (req, res) => {
+  res.json({ service: 'NyayaBot Backend', status: 'ok', health: '/api/health' });
+});
+
 app.get('/api/health', (req, res) => {
   const stats = getStats();
   res.json({ status: 'ok', groq: !!process.env.GROQ_API_KEY, ...stats });
@@ -242,13 +254,28 @@ app.post('/api/police/find', async (req, res) => {
       );
       out center 10;
     `;
-    const overpassUrl = 'https://overpass-api.de/api/interpreter';
-    const overpassResp = await fetch(overpassUrl, {
-      method: 'POST',
-      body: overpassQuery,
-      headers: { 'Content-Type': 'text/plain', 'User-Agent': 'NyayaBot/1.0' },
-    });
-    const overpassData = await overpassResp.json();
+    const overpassEndpoints = [
+      'https://overpass-api.de/api/interpreter',
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://overpass.private.coffee/api/interpreter',
+    ];
+    let overpassData;
+    let lastOverpassError;
+    for (const overpassUrl of overpassEndpoints) {
+      try {
+        const overpassResp = await fetch(overpassUrl, {
+          method: 'POST',
+          body: overpassQuery,
+          headers: { 'Content-Type': 'text/plain', 'User-Agent': 'NyayaBot/1.0' },
+        });
+        if (!overpassResp.ok) throw new Error(`Overpass returned ${overpassResp.status}`);
+        overpassData = await overpassResp.json();
+        break;
+      } catch (error) {
+        lastOverpassError = error;
+      }
+    }
+    if (!overpassData) throw lastOverpassError || new Error('No Overpass endpoint responded');
 
     const elements = overpassData.elements || [];
 
