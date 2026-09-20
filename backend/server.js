@@ -221,6 +221,16 @@ app.get('/api/scam/patterns', (req, res) => {
 });
 
 // ── POLICE STATIONS — Real data via OpenStreetMap Overpass API ────
+const fetchWithTimeout = async (url, options = {}, timeoutMs = 7000) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 app.post('/api/police/find', async (req, res) => {
   const { query, latitude: providedLatitude, longitude: providedLongitude } = req.body;
   if (!query?.trim()) return res.status(400).json({ error: 'Query is required' });
@@ -240,9 +250,9 @@ app.post('/api/police/find', async (req, res) => {
 
       for (const geocodeQuery of geocodeQueries) {
         const geoUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(geocodeQuery)}&format=json&limit=1&countrycodes=in`;
-        const geoResp = await fetch(geoUrl, {
+        const geoResp = await fetchWithTimeout(geoUrl, {
           headers: { 'User-Agent': 'NyayaBot/1.0 (legal assistance app)' },
-        });
+        }, 5000);
         if (!geoResp.ok) continue;
         const candidateData = await geoResp.json();
         if (candidateData.length > 0) {
@@ -263,7 +273,7 @@ app.post('/api/police/find', async (req, res) => {
 
     // Step 2: Query Overpass API for police stations nearby
     const overpassQuery = `
-      [out:json][timeout:15];
+      [out:json][timeout:7];
       (
         node["amenity"="police"](around:${radius},${latitude},${longitude});
         way["amenity"="police"](around:${radius},${latitude},${longitude});
@@ -279,11 +289,11 @@ app.post('/api/police/find', async (req, res) => {
     let lastOverpassError;
     for (const overpassUrl of overpassEndpoints) {
       try {
-        const overpassResp = await fetch(overpassUrl, {
+        const overpassResp = await fetchWithTimeout(overpassUrl, {
           method: 'POST',
           body: overpassQuery,
           headers: { 'Content-Type': 'text/plain', 'User-Agent': 'NyayaBot/1.0' },
-        });
+        }, 7000);
         if (!overpassResp.ok) throw new Error(`Overpass returned ${overpassResp.status}`);
         overpassData = await overpassResp.json();
         break;

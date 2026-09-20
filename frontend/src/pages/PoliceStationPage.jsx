@@ -38,9 +38,11 @@ export default function PoliceStationPage() {
       setSearchTip(data.tip || '');
       if ((data.stations || []).length === 0) toast.error(data.tip || 'No stations found. Try a different area.');
     } catch (e) {
-      const message = e.response?.data?.error || (e.code === 'ERR_NETWORK'
-        ? 'Backend is unreachable. Check the deployed API URL.'
-        : 'Could not find stations. Please try again.');
+      const message = e.code === 'ECONNABORTED'
+        ? 'Search timed out. Please try again or use a broader area.'
+        : e.response?.data?.error || (e.code === 'ERR_NETWORK'
+          ? 'Backend is unreachable. Check the deployed API URL.'
+          : 'Could not find stations. Please try again.');
       toast.error(message);
     } finally { setLoading(false); }
   };

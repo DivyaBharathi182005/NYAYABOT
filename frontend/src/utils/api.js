@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const BASE = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
-const api = axios.create({ baseURL: BASE, timeout: 30000 });
+const api = axios.create({ baseURL: BASE, timeout: 25000 });
 export async function matchLawyer(issue) {
   const { data } = await api.post('/api/lawyer/match', { issue });
   return data;
