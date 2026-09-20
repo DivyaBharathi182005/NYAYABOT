@@ -261,6 +261,26 @@ app.post('/api/police/find', async (req, res) => {
         }
       }
 
+      if (geoData.length === 0 && isPincode) {
+        const postalResp = await fetchWithTimeout(
+          `https://api.postalpincode.in/pincode/${trimmedQuery}`,
+          { headers: { 'User-Agent': 'NyayaBot/1.0 (legal assistance app)' } },
+          5000,
+        );
+        if (postalResp.ok) {
+          const postalData = await postalResp.json();
+          const postOffice = postalData[0]?.PostOffice?.[0];
+          if (postOffice) {
+            const fallbackQuery = `${postOffice.Name}, ${postOffice.District}, ${postOffice.State}, India`;
+            const fallbackUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(fallbackQuery)}&format=json&limit=1&countrycodes=in`;
+            const fallbackResp = await fetchWithTimeout(fallbackUrl, {
+              headers: { 'User-Agent': 'NyayaBot/1.0 (legal assistance app)' },
+            }, 5000);
+            if (fallbackResp.ok) geoData = await fallbackResp.json();
+          }
+        }
+      }
+
       if (!geoData || geoData.length === 0) {
         return res.json({ success: true, stations: [], tip: 'Location not found. Try a different pincode or area name.' });
       }

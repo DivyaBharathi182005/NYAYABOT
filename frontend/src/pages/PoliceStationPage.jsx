@@ -52,10 +52,11 @@ export default function PoliceStationPage() {
     toast('Getting your location...', { icon: '📍' });
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setUserCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        const coordinates = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+        setUserCoords({ lat: coordinates.latitude, lng: coordinates.longitude });
         const loc = `${pos.coords.latitude.toFixed(5)},${pos.coords.longitude.toFixed(5)}`;
         setInput(loc);
-        find(loc, { latitude: pos.coords.latitude, longitude: pos.coords.longitude });
+        find(loc, coordinates);
       },
       (err) => toast.error('Location denied. Please enter your area manually.')
     );
